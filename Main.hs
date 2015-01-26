@@ -24,7 +24,7 @@ module Main
 
 import Blaze.ByteString.Builder.Char.Utf8 (fromShow)
 
-import Control.Applicative (Applicative)
+import Control.Applicative (Applicative, (<$>))
 import Control.Exception (Exception, IOException, catch)
 import Control.Monad (unless)
 import Control.Monad.Base (MonadBase)
@@ -36,6 +36,8 @@ import Control.Monad.Trans.Control (ComposeSt, MonadBaseControl(..), MonadTransC
 import Control.Monad.Trans.Either (EitherT(..), runEitherT, left)
 import Control.Monad.Trans.RWS.Strict (RWST(..), runRWST)
 import Control.Monad.Writer.Class (MonadWriter)
+
+import Data.Default (Default (..))
 
 import Network.Wai (Application, Request, Response, responseLBS, responseBuilder, requestMethod)
 import Network.Wai.Handler.Warp (run)
@@ -99,22 +101,28 @@ runWebmachine req s w = do
     (e, _, _) <- runRWST (runEitherT (getWebmachine w)) req s
     return e
 
-data Resource s m=
+data Resource s m =
     Resource { allowedMethods   :: Handler s m [Method]
              , serviceAvailable :: Handler s m Bool
+             , isForbidden      :: Handler s m Bool
+             , resourceExists   :: Handler s m Bool
              , content          :: Handler s m Response
              }
 
+defaultResource :: Resource s m
+defaultResource = Resource { allowedMethods = pure [methodGet, methodPost]
+                           , serviceAvailable = pure True
+                           , isForbidden = pure False
+                           , resourceExists = 
+                           , content = finishWith (responseLBS status200 [] "Airship default page")
+                           }
+
 -- | Grab whichever value 'a' is in Either
 both :: Either a a -> a
-both e = case e of
-    (Left a)    -> a
-    (Right a)   -> a
+both = either id id
 
-eitherResponse :: Monad m => Request -> s -> Handler s m Response -> m Response
-eitherResponse req s resource = do
-    e <- runWebmachine req s resource
-    return $ both e
+eitherResponse :: (Functor m, Monad m) => Request -> s -> Handler s m Response -> m Response
+eitherResponse req s resource = both <$> runWebmachine req s resource
 
 runResource :: Resource s IO -> Handler s IO Response
 runResource Resource{..} = do
@@ -130,13 +138,17 @@ runResource Resource{..} = do
     available <- serviceAvailable
     unless available $ finishWith (responseLBS status503 [] "")
 
+    forbidden <- isForbidden
+    when forbidden $ finishWith (responseLBS status403 [] "Forbidden")
+
+    exists <- resourceExists
+    unless resourceExists $ finishWith (responseLBS status404 [] "Not found")
+
     -- otherwise return the normal response
     content
 
 resourceToWai :: Resource s IO -> s -> Application
-resourceToWai resource s req respond = do
-    response <- eitherResponse req s (runResource resource)
-    respond response
+resourceToWai resource s req respond = eitherResponse req s (runResource resource) >>= respond
 
 -- Resource examples ---------------------------------------------------------
 ------------------------------------------------------------------------------
